@@ -1,12 +1,59 @@
 import { Profile, DinnerGroup, GroupingResult } from '../types/index';
-import { calculateCompatibility, getExtroversionScore, hasSharedInterests } from './scoring';
+import { calculateCompatibility, hasSharedInterests } from './scoring';
 
-const GROUP_SIZE = 6;
-const MIN_GROUP_SIZE = 5;
+const MIN_GROUP_SIZE = 6;
+const MAX_GROUP_SIZE = 8;
 const MIN_FEMALES = 2;
 const MAX_FEMALES = 3;
 const MAX_INTROVERTS = 2;
 const MIN_SHARED_INTERESTS = 2;
+const MANUAL_REVIEW_MESSAGE = 'Manual review needed for highlighted members';
+
+const getFemaleRangeForSize = (groupSize: number) => {
+  if (groupSize <= 6) {
+    return { min: MIN_FEMALES, max: MAX_FEMALES };
+  }
+  return { min: 2, max: MAX_FEMALES };
+};
+
+const isFemaleCountValid = (femaleCount: number, groupSize: number): boolean => {
+  const { min, max } = getFemaleRangeForSize(groupSize);
+  return femaleCount >= min && femaleCount <= max;
+};
+
+const computeGroupSizes = (total: number): number[] => {
+  if (total <= 0) return [];
+  if (total <= MIN_GROUP_SIZE) return [total];
+
+  const minGroups = Math.ceil(total / MAX_GROUP_SIZE);
+  const maxGroups = Math.max(Math.ceil(total / MIN_GROUP_SIZE), minGroups);
+
+  for (let groupCount = minGroups; groupCount <= maxGroups; groupCount++) {
+    if (groupCount <= 0) continue;
+
+    const base = groupCount * MIN_GROUP_SIZE;
+    const diff = total - base;
+
+    if (diff < 0) continue;
+    if (diff > groupCount * (MAX_GROUP_SIZE - MIN_GROUP_SIZE)) continue;
+
+    const sizes = Array(groupCount).fill(MIN_GROUP_SIZE);
+    let remaining = diff;
+    let idx = 0;
+
+    while (remaining > 0) {
+      if (sizes[idx] < MAX_GROUP_SIZE) {
+        sizes[idx]++;
+        remaining--;
+      }
+      idx = (idx + 1) % groupCount;
+    }
+
+    return sizes;
+  }
+
+  return [total];
+};
 
 interface GroupConstraints {
   femaleCount: number;
@@ -22,20 +69,16 @@ interface ValidationResult {
 const validateGroupConstraints = (group: GroupConstraints, groupSize: number, strictMode: boolean = true): ValidationResult => {
   let softViolations = 0;
 
-  // Check female count
-  if (groupSize === 5) {
-    if (group.femaleCount < 2 || group.femaleCount > 3) {
-      if (strictMode) return { valid: false, softViolations: 0 };
-      softViolations += Math.abs(group.femaleCount < 2 ? 2 - group.femaleCount : group.femaleCount - 3);
-    }
-  } else {
-    if (group.femaleCount < MIN_FEMALES || group.femaleCount > MAX_FEMALES) {
-      if (strictMode) return { valid: false, softViolations: 0 };
-      softViolations += Math.abs(group.femaleCount < MIN_FEMALES ? MIN_FEMALES - group.femaleCount : group.femaleCount - MAX_FEMALES);
+  if (!isFemaleCountValid(group.femaleCount, groupSize)) {
+    if (strictMode) return { valid: false, softViolations: 0 };
+    const { min, max } = getFemaleRangeForSize(groupSize);
+    if (group.femaleCount < min) {
+      softViolations += min - group.femaleCount;
+    } else if (group.femaleCount > max) {
+      softViolations += group.femaleCount - max;
     }
   }
 
-  // Check introvert count - softer check, allow overflow
   if (group.introvertCount > MAX_INTROVERTS) {
     if (strictMode) return { valid: false, softViolations: 0 };
     softViolations += group.introvertCount - MAX_INTROVERTS;
@@ -44,12 +87,37 @@ const validateGroupConstraints = (group: GroupConstraints, groupSize: number, st
   return { valid: true, softViolations };
 };
 
+const describeConstraintIssues = (group: GroupConstraints, groupSize: number): string[] => {
+  const issues: string[] = [];
+  const { min, max } = getFemaleRangeForSize(groupSize);
+
+  if (group.femaleCount < min) {
+    issues.push(`Needs at least ${min} female${min > 1 ? 's' : ''}`);
+  }
+  if (group.femaleCount > max) {
+    issues.push(`Limit females to ${max}`);
+  }
+  if (group.introvertCount > MAX_INTROVERTS) {
+    issues.push(`Limit introverts to ${MAX_INTROVERTS}`);
+  }
+
+  return issues;
+};
+
 const countIntroverts = (members: Profile[]): number => {
   return members.filter(m => m.introvert_score >= 7).length;
 };
 
 const countFemales = (members: Profile[]): number => {
   return members.filter(m => m.gender === 'Female').length;
+};
+
+const markHighlight = (profile: Profile, reason: string, highlightMap: Map<string, string>) => {
+  const existing = highlightMap.get(profile.id);
+  const combinedReason = existing ? `${existing}; ${reason}` : reason;
+  highlightMap.set(profile.id, combinedReason);
+  profile.highlighted = true;
+  profile.highlight_reason = combinedReason;
 };
 
 const findBestCandidate = (
@@ -68,15 +136,20 @@ const findBestCandidate = (
     const candidate = availableProfiles[i];
     const currentFemales = countFemales(currentGroup);
     const currentIntroverts = countIntroverts(currentGroup);
+    const newGroupSize = currentGroup.length + 1;
+    const newFemaleCount = currentFemales + (candidate.gender === 'Female' ? 1 : 0);
 
-    // In strict mode, enforce constraints
     if (strictMode) {
-      if (candidate.gender === 'Female' && currentFemales >= MAX_FEMALES) continue;
-      if (candidate.gender === 'Male' && currentGroup.length - currentFemales >= maxGroupSize - MIN_FEMALES) continue;
+      if (!isFemaleCountValid(newFemaleCount, newGroupSize)) continue;
+
+      const { min: minFemalesAtFinal } = getFemaleRangeForSize(maxGroupSize);
+      const remainingSlots = maxGroupSize - newGroupSize;
+      const potentialMaxFemales = newFemaleCount + remainingSlots;
+      if (potentialMaxFemales < minFemalesAtFinal) continue;
+
       if (candidate.introvert_score >= 7 && currentIntroverts >= MAX_INTROVERTS) continue;
     }
 
-    // Calculate compatibility score
     let compatibilitySum = 0;
     let sharedInterestCount = 0;
 
@@ -97,16 +170,14 @@ const findBestCandidate = (
       score += 10;
     }
 
-    // Bonus for gender diversity
     if (currentGroup.length < maxGroupSize) {
-      const currentFemaleRatio = currentFemales / currentGroup.length;
+      const currentFemaleRatio = currentFemales / Math.max(currentGroup.length, 1);
       const newFemaleRatio = (currentFemales + (candidate.gender === 'Female' ? 1 : 0)) / (currentGroup.length + 1);
       if (Math.abs(newFemaleRatio - 0.4) < Math.abs(currentFemaleRatio - 0.4)) {
         score += 15;
       }
     }
 
-    // Bonus for different universities
     const sameUniversityCount = currentGroup.filter(m => m.university === candidate.university).length;
     if (sameUniversityCount === 0) {
       score += 10;
@@ -123,245 +194,252 @@ const findBestCandidate = (
   return bestIndex >= 0 ? { index: bestIndex, score: bestScore } : null;
 };
 
-const createGroupWithRelaxedConstraints = (
+const pickStartIndex = (availableProfiles: Profile[], usedIndices: Set<number>): number => {
+  for (let i = 0; i < availableProfiles.length; i++) {
+    if (!usedIndices.has(i) && availableProfiles[i].gender === 'Female') {
+      return i;
+    }
+  }
+  for (let i = 0; i < availableProfiles.length; i++) {
+    if (!usedIndices.has(i)) {
+      return i;
+    }
+  }
+  return -1;
+};
+
+const findFirstUnusedIndex = (availableProfiles: Profile[], usedIndices: Set<number>): number => {
+  for (let i = 0; i < availableProfiles.length; i++) {
+    if (!usedIndices.has(i)) {
+      return i;
+    }
+  }
+  return -1;
+};
+
+interface BuildGroupResult {
+  members: Profile[];
+  highlightMap: Map<string, string>;
+}
+
+const buildGroup = (
   availableProfiles: Profile[],
   usedIndices: Set<number>,
   targetGroupSize: number
-): Profile[] | null => {
+): BuildGroupResult => {
   const currentGroup: Profile[] = [];
-  let attempts = 0;
-  const maxAttempts = 100;
+  const highlightMap = new Map<string, string>();
+  const flexibleMemberReasons = new Map<string, string>();
 
-  // Find first unused profile
-  let startIndex = -1;
-  for (let i = 0; i < availableProfiles.length; i++) {
-    if (!usedIndices.has(i)) {
-      startIndex = i;
-      break;
+  const addMember = (index: number, reason?: string) => {
+    const profile = availableProfiles[index];
+    currentGroup.push(profile);
+    usedIndices.add(index);
+    if (reason) {
+      flexibleMemberReasons.set(profile.id, reason);
     }
+  };
+
+  const startIndex = pickStartIndex(availableProfiles, usedIndices);
+  if (startIndex === -1) {
+    return { members: currentGroup, highlightMap };
   }
 
-  if (startIndex === -1) return null;
+  addMember(startIndex);
 
-  currentGroup.push(availableProfiles[startIndex]);
-  usedIndices.add(startIndex);
+  let iterations = 0;
+  const maxIterations = 200;
 
-  // Fill group with relaxed constraints
-  while (currentGroup.length < targetGroupSize && attempts < maxAttempts) {
-    const candidate = findBestCandidate(availableProfiles, currentGroup, usedIndices, targetGroupSize, false);
+  while (currentGroup.length < targetGroupSize && iterations < maxIterations) {
+    iterations++;
+    const candidate = findBestCandidate(availableProfiles, currentGroup, usedIndices, targetGroupSize, true);
+    if (candidate) {
+      addMember(candidate.index);
+      continue;
+    }
 
-    if (!candidate) {
+    const relaxed = findBestCandidate(availableProfiles, currentGroup, usedIndices, targetGroupSize, false);
+    if (relaxed) {
+      addMember(relaxed.index, `Best available fit for constraints`);
+      continue;
+    }
+
+    const fallbackIdx = findFirstUnusedIndex(availableProfiles, usedIndices);
+    if (fallbackIdx === -1) {
       break;
     }
 
-    currentGroup.push(availableProfiles[candidate.index]);
-    usedIndices.add(candidate.index);
+    addMember(fallbackIdx, `Placed to complete table`);
   }
 
-  return currentGroup.length >= MIN_GROUP_SIZE ? currentGroup : null;
+  const groupConstraints: GroupConstraints = {
+    femaleCount: countFemales(currentGroup),
+    introvertCount: countIntroverts(currentGroup),
+    members: currentGroup,
+  };
+
+  const validation = validateGroupConstraints(groupConstraints, targetGroupSize, true);
+  const issues = validation.valid ? [] : describeConstraintIssues(groupConstraints, targetGroupSize);
+
+  flexibleMemberReasons.forEach((forcedReason, memberId) => {
+    const member = currentGroup.find(m => m.id === memberId);
+    if (member) {
+      const reason = issues.length > 0 ? `${forcedReason} • ${issues.join('; ')}` : forcedReason;
+      markHighlight(member, reason, highlightMap);
+    }
+  });
+
+  if (!validation.valid && flexibleMemberReasons.size === 0) {
+    const fallbackReason = issues.length > 0 ? issues.join('; ') : 'Constraint review needed';
+    currentGroup.forEach(member => {
+      markHighlight(member, fallbackReason, highlightMap);
+    });
+  }
+
+  return { members: currentGroup, highlightMap };
+};
+
+const refreshHighlightReasons = (group: DinnerGroup, highlightMap: Map<string, string>) => {
+  const highlightedNames = group.members
+    .filter(member => highlightMap.has(member.id))
+    .map(member => member.name);
+
+  group.members.forEach(member => {
+    const reason = highlightMap.get(member.id);
+    if (reason) {
+      member.highlighted = true;
+      member.highlight_reason = reason;
+    }
+  });
+
+  const attentionMessageIndex = group.matching_reasons.findIndex(reason => reason.startsWith('Needs attention:'));
+
+  if (highlightedNames.length > 0) {
+    const attentionMessage = `Needs attention: ${highlightedNames.join(', ')}`;
+    if (attentionMessageIndex >= 0) {
+      group.matching_reasons[attentionMessageIndex] = attentionMessage;
+    } else {
+      group.matching_reasons.push(attentionMessage);
+    }
+    if (!group.matching_reasons.includes(MANUAL_REVIEW_MESSAGE)) {
+      group.matching_reasons.push(MANUAL_REVIEW_MESSAGE);
+    }
+  } else if (attentionMessageIndex >= 0) {
+    group.matching_reasons.splice(attentionMessageIndex, 1);
+    const manualIdx = group.matching_reasons.indexOf(MANUAL_REVIEW_MESSAGE);
+    if (manualIdx >= 0) {
+      group.matching_reasons.splice(manualIdx, 1);
+    }
+  }
 };
 
 export const createDinnerGroups = (profiles: Profile[]): GroupingResult => {
-  const availableProfiles = [...profiles];
+  const availableProfiles = profiles.map(profile => ({ ...profile, highlighted: false, highlight_reason: undefined }));
   const groups: DinnerGroup[] = [];
+  const groupHighlightMaps: Map<string, string>[] = [];
   const usedIndices = new Set<number>();
 
-  let groupNumber = 0;
+  const targetGroupSizes = computeGroupSizes(availableProfiles.length);
 
-  // Phase 1: Form groups with strict constraints
-  while (availableProfiles.filter((_, i) => !usedIndices.has(i)).length >= GROUP_SIZE) {
-    const remainingCount = availableProfiles.filter((_, i) => !usedIndices.has(i)).length;
-
-    let targetGroupSize = GROUP_SIZE;
-    if (remainingCount === GROUP_SIZE + 1) {
-      targetGroupSize = GROUP_SIZE;
+  targetGroupSizes.forEach(targetSize => {
+    if (usedIndices.size >= availableProfiles.length) {
+      return;
     }
 
-    const currentGroup: Profile[] = [];
-    let attempts = 0;
-    const maxAttempts = 50;
-
-    // Start with a female
-    let startIndex = -1;
-    for (let i = 0; i < availableProfiles.length; i++) {
-      if (!usedIndices.has(i) && availableProfiles[i].gender === 'Female') {
-        startIndex = i;
-        break;
-      }
+    const { members, highlightMap } = buildGroup(availableProfiles, usedIndices, targetSize);
+    if (members.length === 0) {
+      return;
     }
 
-    if (startIndex === -1) {
-      for (let i = 0; i < availableProfiles.length; i++) {
-        if (!usedIndices.has(i)) {
-          startIndex = i;
-          break;
-        }
-      }
-    }
+    const group = createGroupObject(members, groups.length, highlightMap);
+    groups.push(group);
+    groupHighlightMaps.push(highlightMap);
+  });
 
-    if (startIndex === -1) break;
+  const remainingIndices = availableProfiles
+    .map((_, idx) => idx)
+    .filter(idx => !usedIndices.has(idx));
 
-    currentGroup.push(availableProfiles[startIndex]);
-    usedIndices.add(startIndex);
+  for (const idx of remainingIndices) {
+    const profile = availableProfiles[idx];
 
-    // Fill with strict constraints
-    while (currentGroup.length < targetGroupSize && attempts < maxAttempts) {
-      const candidate = findBestCandidate(availableProfiles, currentGroup, usedIndices, targetGroupSize, true);
+    let bestValidGroup = -1;
+    let bestValidScore = -1;
+    let bestFlexibleGroup = -1;
+    let bestFlexibleScore = -1;
+    let bestOverflowGroup = -1;
+    let bestOverflowScore = -1;
 
-      if (!candidate) {
-        if (currentGroup.length > 1) {
-          const lastMember = currentGroup.pop();
-          const lastIndex = availableProfiles.indexOf(lastMember!);
-          usedIndices.delete(lastIndex);
-          attempts++;
-          continue;
-        } else {
-          break;
-        }
-      }
-
-      currentGroup.push(availableProfiles[candidate.index]);
-      usedIndices.add(candidate.index);
-    }
-
-    // Validate with strict mode
-    if (currentGroup.length === targetGroupSize) {
-      const groupConstraints: GroupConstraints = {
-        femaleCount: countFemales(currentGroup),
-        introvertCount: countIntroverts(currentGroup),
-        members: currentGroup,
-      };
-
-      const validation = validateGroupConstraints(groupConstraints, currentGroup.length, true);
-      if (validation.valid) {
-        groups.push(createGroupObject(currentGroup, groupNumber));
-        groupNumber++;
-      } else {
-        // Backtrack
-        currentGroup.forEach(member => {
-          const index = availableProfiles.indexOf(member);
-          usedIndices.delete(index);
-        });
-      }
-    }
-
-    if (attempts >= maxAttempts) break;
-  }
-
-  // Phase 2: Form groups of 5 if we have exactly 5+ remaining
-  while (availableProfiles.filter((_, i) => !usedIndices.has(i)).length >= MIN_GROUP_SIZE) {
-    const remainingCount = availableProfiles.filter((_, i) => !usedIndices.has(i)).length;
-
-    if (remainingCount < MIN_GROUP_SIZE) break;
-
-    let targetGroupSize = remainingCount >= GROUP_SIZE ? GROUP_SIZE : MIN_GROUP_SIZE;
-    if (remainingCount === MIN_GROUP_SIZE) {
-      targetGroupSize = MIN_GROUP_SIZE;
-    } else if (remainingCount > MIN_GROUP_SIZE && remainingCount < GROUP_SIZE) {
-      targetGroupSize = remainingCount;
-    }
-
-    const currentGroup: Profile[] = [];
-    let attempts = 0;
-    const maxAttempts = 50;
-
-    let startIndex = -1;
-    for (let i = 0; i < availableProfiles.length; i++) {
-      if (!usedIndices.has(i) && availableProfiles[i].gender === 'Female') {
-        startIndex = i;
-        break;
-      }
-    }
-
-    if (startIndex === -1) {
-      for (let i = 0; i < availableProfiles.length; i++) {
-        if (!usedIndices.has(i)) {
-          startIndex = i;
-          break;
-        }
-      }
-    }
-
-    if (startIndex === -1) break;
-
-    currentGroup.push(availableProfiles[startIndex]);
-    usedIndices.add(startIndex);
-
-    while (currentGroup.length < targetGroupSize && attempts < maxAttempts) {
-      const candidate = findBestCandidate(availableProfiles, currentGroup, usedIndices, targetGroupSize, true);
-
-      if (!candidate) {
-        if (currentGroup.length > 1) {
-          const lastMember = currentGroup.pop();
-          const lastIndex = availableProfiles.indexOf(lastMember!);
-          usedIndices.delete(lastIndex);
-          attempts++;
-          continue;
-        } else {
-          break;
-        }
-      }
-
-      currentGroup.push(availableProfiles[candidate.index]);
-      usedIndices.add(candidate.index);
-    }
-
-    if (currentGroup.length >= MIN_GROUP_SIZE) {
-      const groupConstraints: GroupConstraints = {
-        femaleCount: countFemales(currentGroup),
-        introvertCount: countIntroverts(currentGroup),
-        members: currentGroup,
-      };
-
-      const validation = validateGroupConstraints(groupConstraints, currentGroup.length, true);
-      if (validation.valid) {
-        groups.push(createGroupObject(currentGroup, groupNumber));
-        groupNumber++;
-      } else {
-        currentGroup.forEach(member => {
-          const index = availableProfiles.indexOf(member);
-          usedIndices.delete(index);
-        });
-      }
-    }
-
-    if (attempts >= maxAttempts) break;
-  }
-
-  // Phase 3: Add remaining profiles to existing groups (NO ONE LEFT BEHIND)
-  const ungroupedIndices = availableProfiles
-    .map((_, i) => i)
-    .filter(i => !usedIndices.has(i));
-
-  for (const ungroupedIdx of ungroupedIndices) {
-    const ungroupedProfile = availableProfiles[ungroupedIdx];
-
-    // Find the best group to add this person to (highest compatibility)
-    let bestGroupIdx = -1;
-    let bestScore = -1;
-
-    for (let g = 0; g < groups.length; g++) {
+    groups.forEach((group, groupIdx) => {
       let compatSum = 0;
-      for (const member of groups[g].members) {
-        compatSum += calculateCompatibility(ungroupedProfile, member);
+      for (const member of group.members) {
+        compatSum += calculateCompatibility(profile, member);
       }
-      const avgCompat = compatSum / groups[g].members.length;
+      const avgCompat = compatSum / group.members.length;
 
-      if (avgCompat > bestScore) {
-        bestScore = avgCompat;
-        bestGroupIdx = g;
+      const currentSize = group.members.length;
+
+      if (currentSize < MAX_GROUP_SIZE) {
+        const potentialMembers = [...group.members, profile];
+        const constraints: GroupConstraints = {
+          femaleCount: countFemales(potentialMembers),
+          introvertCount: countIntroverts(potentialMembers),
+          members: potentialMembers,
+        };
+        const validation = validateGroupConstraints(constraints, potentialMembers.length, true);
+
+        if (validation.valid && avgCompat > bestValidScore) {
+          bestValidScore = avgCompat;
+          bestValidGroup = groupIdx;
+        }
+
+        if (avgCompat > bestFlexibleScore) {
+          bestFlexibleScore = avgCompat;
+          bestFlexibleGroup = groupIdx;
+        }
+      } else {
+        if (avgCompat > bestOverflowScore) {
+          bestOverflowScore = avgCompat;
+          bestOverflowGroup = groupIdx;
+        }
       }
+    });
+
+    if (bestValidGroup >= 0) {
+      const group = groups[bestValidGroup];
+      group.members.push(profile);
+      usedIndices.add(idx);
+      refreshHighlightReasons(group, groupHighlightMaps[bestValidGroup]);
+      continue;
     }
 
-    // Add to best group
-    if (bestGroupIdx >= 0) {
-      groups[bestGroupIdx].members.push(ungroupedProfile);
-      usedIndices.add(ungroupedIdx);
+    if (bestFlexibleGroup >= 0) {
+      const group = groups[bestFlexibleGroup];
+      group.members.push(profile);
+      usedIndices.add(idx);
+      markHighlight(profile, 'Forced placement to seat everyone', groupHighlightMaps[bestFlexibleGroup]);
+      refreshHighlightReasons(group, groupHighlightMaps[bestFlexibleGroup]);
+      continue;
     }
+
+    if (bestOverflowGroup >= 0) {
+      const group = groups[bestOverflowGroup];
+      group.members.push(profile);
+      usedIndices.add(idx);
+      markHighlight(profile, 'Table exceeds capacity — manual adjustment required', groupHighlightMaps[bestOverflowGroup]);
+      refreshHighlightReasons(group, groupHighlightMaps[bestOverflowGroup]);
+      continue;
+    }
+
+    const highlightMap = new Map<string, string>();
+    markHighlight(profile, 'No other tables available', highlightMap);
+    const newGroup = createGroupObject([profile], groups.length, highlightMap);
+    groups.push(newGroup);
+    groupHighlightMaps.push(highlightMap);
+    usedIndices.add(idx);
   }
 
-  // Recalculate group stats after adding stragglers
-  groups.forEach(group => {
+  groups.forEach((group, idx) => {
     group.female_count = countFemales(group.members);
     group.introvert_count = countIntroverts(group.members);
 
@@ -374,17 +452,27 @@ export const createDinnerGroups = (profiles: Profile[]): GroupingResult => {
       }
     }
     group.compatibility_score = pairCount > 0 ? Math.round((totalCompatibility / pairCount) * 100) / 100 : 0;
+
+    refreshHighlightReasons(group, groupHighlightMaps[idx]);
   });
 
   return {
     groups,
-    totalProfiles: profiles.length,
+    totalProfiles: availableProfiles.length,
     groupsFormed: groups.length,
     ungroupedProfiles: [],
   };
 };
 
-function createGroupObject(currentGroup: Profile[], groupNumber: number): DinnerGroup {
+function createGroupObject(currentGroup: Profile[], groupNumber: number, highlightMap: Map<string, string>): DinnerGroup {
+  currentGroup.forEach(member => {
+    const reason = highlightMap.get(member.id);
+    if (reason) {
+      member.highlighted = true;
+      member.highlight_reason = reason;
+    }
+  });
+
   const groupConstraints: GroupConstraints = {
     femaleCount: countFemales(currentGroup),
     introvertCount: countIntroverts(currentGroup),
@@ -433,6 +521,15 @@ function createGroupObject(currentGroup: Profile[], groupNumber: number): Dinner
   const dominantVibe = Array.from(collegeVibes.entries()).sort((a, b) => b[1] - a[1])[0];
   if (dominantVibe && dominantVibe[1] >= Math.ceil(currentGroup.length / 2)) {
     reasons.push(`Shared college vibe: "${dominantVibe[0]}"`);
+  }
+
+  const highlightedNames = currentGroup
+    .filter(member => highlightMap.has(member.id))
+    .map(member => member.name);
+
+  if (highlightedNames.length > 0) {
+    reasons.push(`Needs attention: ${highlightedNames.join(', ')}`);
+    reasons.push(MANUAL_REVIEW_MESSAGE);
   }
 
   let totalCompatibility = 0;

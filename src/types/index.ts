@@ -8,6 +8,8 @@ export interface Profile {
   instagram?: string;
   city?: string;
   course?: string;
+  highlighted?: boolean;
+  highlight_reason?: string;
 
   // Quiz Responses
   spontaneous_preference: boolean;

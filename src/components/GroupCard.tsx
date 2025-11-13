@@ -7,6 +7,12 @@ interface GroupCardProps {
 }
 
 export const GroupCard: React.FC<GroupCardProps> = ({ group }) => {
+  const groupSize = group.members.length;
+  const maleCount = groupSize - group.female_count;
+  const extrovertCount = groupSize - group.introvert_count;
+  const highlightedMembers = group.members.filter(member => member.highlighted);
+  const highlightedCount = highlightedMembers.length;
+
   return (
     <div className="bg-white rounded-lg shadow-lg p-6 mb-6 border-l-4 border-blue-500">
       <div className="flex justify-between items-start mb-4">
@@ -17,11 +23,17 @@ export const GroupCard: React.FC<GroupCardProps> = ({ group }) => {
         <div className="flex gap-3 text-sm font-medium">
           <div className="bg-blue-100 text-blue-800 px-3 py-1 rounded-full flex items-center gap-1">
             <Users size={16} />
-            {group.female_count}F, {6 - group.female_count}M
+            {group.female_count}F, {maleCount}M
           </div>
           <div className="bg-green-100 text-green-800 px-3 py-1 rounded-full">
-            Extrovert +{6 - group.introvert_count}
+            Extrovert +{extrovertCount}
           </div>
+          {highlightedCount > 0 && (
+            <div className="bg-red-100 text-red-700 px-3 py-1 rounded-full flex items-center gap-1 font-semibold">
+              <span aria-hidden>⚠️</span>
+              {highlightedCount} highlight{highlightedCount > 1 ? 's' : ''}
+            </div>
+          )}
         </div>
       </div>
 
@@ -43,64 +55,87 @@ export const GroupCard: React.FC<GroupCardProps> = ({ group }) => {
       </div>
 
       <div className="space-y-3">
-        {group.members.map((member, idx) => (
-          <div key={member.id} className="p-3 bg-gray-50 rounded-lg border border-gray-200 hover:border-blue-300 transition">
-            <div className="flex justify-between items-start mb-2">
-              <div>
-                <p className="font-semibold text-gray-900">{idx + 1}. {member.name}</p>
-                <p className="text-xs text-gray-600">{member.course} • {member.year} Year • {member.university}</p>
-              </div>
-              <div className="text-right">
-                <p className="text-xs font-medium text-gray-700">{member.city}</p>
-                <p className="text-xs text-gray-500">@{member.instagram}</p>
-              </div>
-            </div>
+        {group.members.map((member, idx) => {
+          const cardClasses = `relative p-3 rounded-lg border transition ${
+            member.highlighted
+              ? 'bg-red-50 border-red-400 hover:border-red-500'
+              : 'bg-gray-50 border-gray-200 hover:border-blue-300'
+          }`;
+          const nameClasses = member.highlighted ? 'font-semibold text-red-700' : 'font-semibold text-gray-900';
 
-            <div className="grid grid-cols-4 gap-2 text-xs">
-              <div className="flex items-center gap-1">
-                <span className={`inline-block w-2 h-2 rounded-full ${member.introvert_score >= 7 ? 'bg-purple-500' : 'bg-orange-500'}`}></span>
-                <span className="text-gray-600">{member.introvert_score >= 7 ? 'Introvert' : 'Extrovert'} ({member.introvert_score})</span>
-              </div>
-              <div className="flex items-center gap-1">
-                <Music size={14} className="text-gray-500" />
-                <span className="text-gray-600">{member.music_vibe}</span>
-              </div>
-              <div className="flex items-center gap-1">
-                <Heart size={14} className="text-gray-500" />
-                <span className="text-gray-600">{member.relationship_status}</span>
-              </div>
-              <div className="text-right">
-                <span className={`inline-block px-2 py-1 rounded-full text-xs font-medium ${
-                  member.weekend_plan === 'Partying' || member.weekend_plan === 'Clubbing'
-                    ? 'bg-pink-100 text-pink-800'
-                    : member.weekend_plan === 'Chill in cafe'
-                    ? 'bg-green-100 text-green-800'
-                    : 'bg-yellow-100 text-yellow-800'
-                }`}>
-                  {member.weekend_plan}
+          return (
+            <div key={member.id} className={cardClasses}>
+              {member.highlighted && (
+                <span className="absolute top-2 right-2 text-xs font-semibold text-red-600 bg-red-100 px-2 py-0.5 rounded-full">
+                  Needs review
                 </span>
-              </div>
-            </div>
+              )}
 
-            <div className="mt-2 flex gap-2 flex-wrap text-xs">
-              {member.college_vibe && (
-                <span className="bg-purple-100 text-purple-800 px-2 py-1 rounded">
-                  {member.college_vibe}
-                </span>
-              )}
-              {member.fitness_active && (
-                <span className="bg-green-100 text-green-800 px-2 py-1 rounded">
-                  Fitness Active
-                </span>
-              )}
-              {member.spontaneous_preference && (
-                <span className="bg-blue-100 text-blue-800 px-2 py-1 rounded">
-                  Spontaneous
-                </span>
+              <div className="flex justify-between items-start mb-2">
+                <div>
+                  <p className={nameClasses}>
+                    {idx + 1}. {member.name}
+                  </p>
+                  <p className="text-xs text-gray-600">{member.course} • {member.year} Year • {member.university}</p>
+                </div>
+                <div className="text-right">
+                  <p className="text-xs font-medium text-gray-700">{member.city}</p>
+                  <p className="text-xs text-gray-500">@{member.instagram}</p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-4 gap-2 text-xs">
+                <div className="flex items-center gap-1">
+                  <span className={`inline-block w-2 h-2 rounded-full ${member.introvert_score >= 7 ? 'bg-purple-500' : 'bg-orange-500'}`}></span>
+                  <span className="text-gray-600">{member.introvert_score >= 7 ? 'Introvert' : 'Extrovert'} ({member.introvert_score})</span>
+                </div>
+                <div className="flex items-center gap-1">
+                  <Music size={14} className="text-gray-500" />
+                  <span className="text-gray-600">{member.music_vibe}</span>
+                </div>
+                <div className="flex items-center gap-1">
+                  <Heart size={14} className="text-gray-500" />
+                  <span className="text-gray-600">{member.relationship_status}</span>
+                </div>
+                <div className="text-right">
+                  <span className={`inline-block px-2 py-1 rounded-full text-xs font-medium ${
+                    member.weekend_plan === 'Partying' || member.weekend_plan === 'Clubbing'
+                      ? 'bg-pink-100 text-pink-800'
+                      : member.weekend_plan === 'Chill in cafe'
+                      ? 'bg-green-100 text-green-800'
+                      : 'bg-yellow-100 text-yellow-800'
+                  }`}>
+                    {member.weekend_plan}
+                  </span>
+                </div>
+              </div>
+
+              <div className="mt-2 flex gap-2 flex-wrap text-xs">
+                {member.college_vibe && (
+                  <span className="bg-purple-100 text-purple-800 px-2 py-1 rounded">
+                    {member.college_vibe}
+                  </span>
+                )}
+                {member.fitness_active && (
+                  <span className="bg-green-100 text-green-800 px-2 py-1 rounded">
+                    Fitness Active
+                  </span>
+                )}
+                {member.spontaneous_preference && (
+                  <span className="bg-blue-100 text-blue-800 px-2 py-1 rounded">
+                    Spontaneous
+                  </span>
+                )}
+              </div>
+
+              {member.highlighted && member.highlight_reason && (
+                <div className="mt-3 p-2 rounded bg-red-100 border border-red-200 text-xs text-red-700">
+                  {member.highlight_reason}
+                </div>
               )}
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
